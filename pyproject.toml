@@ -3,9 +3,13 @@ name = "my-mlir-playground"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "mlir_wheel",
-    "mlir-python-bindings"
+    "mlir==22.0.0.2025111701+cuda.99630eb1",
+    "mlir-python-bindings",
+    "cuda-python"
 ]
 
 [tool.uv]
-find-links = ["https://llvm.github.io/eudsl"]
+find-links = [
+    "https://llvm.github.io/eudsl",
+    "https://github.com/makslevental/mlir-wheels/releases/expanded_assets/latest"
+]
