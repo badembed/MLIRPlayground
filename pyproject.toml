@@ -1,6 +1,11 @@
 [project]
-name = "test-mlir"
+name = "my-mlir-playground"
 version = "0.1.0"
-description = "test mlir"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "mlir_wheel",
+    "mlir-python-bindings"
+]
+
+[tool.uv]
+find-links = ["https://llvm.github.io/eudsl"]
