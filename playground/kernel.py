@@ -7,6 +7,7 @@ from mlir.runtime.np_to_memref import get_ranked_memref_descriptor
 
 from cuda.bindings import runtime as cudart
 
+import argparse
 import ctypes
 import numpy as np
 
@@ -94,29 +95,7 @@ def retarget_memref_to_device(mref, dev_ptr):
     return mref
 
 
-def main():
-    ctx = ir.Context()
-    kernel = create_kernel(ctx)
-
-    pm = create_gpu_pipeline(ctx)
-    pm.run(kernel.operation)
-
-    mlir_libs = [
-        "/home/alex/sources/ML/mlirPython2/.venv/lib/python3.12/site-packages/mlir/lib/libmlir_cuda_runtime.so"
-    ]
-    eng = ExecutionEngine(kernel, shared_libs=mlir_libs)
-    eng.initialize()
-    add_func = eng.lookup("add")
-
-        # CPU buffers
-    a = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
-    b = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
-    out = np.ascontiguousarray(np.zeros(4, dtype=np.float32))
-
-    a_memref = get_ranked_memref_descriptor(a)
-    b_memref = get_ranked_memref_descriptor(b)
-    out_memref = get_ranked_memref_descriptor(out)
-
+def prepare_gpu_buffers(a, b, out):
     # GPU buffers
     err, d_a = cudart.cudaMalloc(a.nbytes)
     assert err == cudart.cudaError_t.cudaSuccess
@@ -145,21 +124,64 @@ def main():
     )
     assert err == cudart.cudaError_t.cudaSuccess
 
-    # Retarget memrefs to device pointers (in-place)
-    retarget_memref_to_device(a_memref, d_a)
-    retarget_memref_to_device(b_memref, d_b)
-    retarget_memref_to_device(out_memref, d_out)
+    return d_a, d_b, d_out
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run MLIR kernel via JIT (CPU or GPU).")
+    parser.add_argument(
+        "--mode",
+        choices=("cpu", "gpu"),
+        default="gpu",
+        help="Execution mode: cpu or gpu (default: gpu).",
+    )
+    return parser.parse_args()
+
+
+def main():
+    pargs = parse_args()
+    ctx = ir.Context()
+    kernel = create_kernel(ctx)
+
+    if pargs.mode == "gpu":
+        pm = create_gpu_pipeline(ctx)
+    else:
+        pm = create_jit_pipeline(ctx)
+    pm.run(kernel.operation)
+
+    mlir_libs = [
+        "/home/alex/sources/ML/mlirPython2/.venv/lib/python3.12/site-packages/mlir/lib/libmlir_cuda_runtime.so"
+    ]
+    eng = ExecutionEngine(kernel, shared_libs=mlir_libs)
+    eng.initialize()
+    add_func = eng.lookup("add")
+
+    # CPU buffers
+    a = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
+    b = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
+    out = np.ascontiguousarray(np.zeros(4, dtype=np.float32))
+
+    a_memref = get_ranked_memref_descriptor(a)
+    b_memref = get_ranked_memref_descriptor(b)
+    out_memref = get_ranked_memref_descriptor(out)
+
+    if pargs.mode == "gpu":
+        d_a, d_b, d_out = prepare_gpu_buffers(a, b, out)
+        # Retarget memrefs to device pointers (in-place)
+        retarget_memref_to_device(a_memref, d_a)
+        retarget_memref_to_device(b_memref, d_b)
+        retarget_memref_to_device(out_memref, d_out)
 
     # Pack args for MLIR JIT
     args = memref.to_packed_args([a_memref, b_memref, out_memref])
     add_func(args)
 
-    # Copy result back to host
-    (err,) = cudart.cudaMemcpy(
-        out.ctypes.data, d_out, out.nbytes,
-        cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
-    )
-    assert err == cudart.cudaError_t.cudaSuccess
+    if pargs.mode == "gpu":
+        (err,) = cudart.cudaMemcpy(
+            out.ctypes.data, d_out, out.nbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+        )
+        assert err == cudart.cudaError_t.cudaSuccess
 
     print("out =", out)
 
