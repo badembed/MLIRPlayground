@@ -131,17 +131,31 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run MLIR kernel via JIT (CPU or GPU).")
     parser.add_argument(
         "--mode",
-        choices=("cpu", "gpu"),
+        choices=("cpu", "gpu", "simulate"),
         default="gpu",
-        help="Execution mode: cpu or gpu (default: gpu).",
+        help="Execution mode: cpu, gpu, or simulate (default: gpu).",
     )
     return parser.parse_args()
+
+
+def simulate_linalg_add(a, b, out):
+    np.add(a, b, out=out)
 
 
 def main():
     pargs = parse_args()
     ctx = ir.Context()
     kernel = create_kernel(ctx)
+
+    # CPU buffers
+    a = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
+    b = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
+    out = np.ascontiguousarray(np.zeros(4, dtype=np.float32))
+
+    if pargs.mode == "simulate":
+        simulate_linalg_add(a, b, out)
+        print("out =", out)
+        return
 
     if pargs.mode == "gpu":
         pm = create_gpu_pipeline(ctx)
@@ -155,11 +169,6 @@ def main():
     eng = ExecutionEngine(kernel, shared_libs=mlir_libs)
     eng.initialize()
     add_func = eng.lookup("add")
-
-    # CPU buffers
-    a = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
-    b = np.ascontiguousarray(np.array([1,1,1,1], dtype=np.float32))
-    out = np.ascontiguousarray(np.zeros(4, dtype=np.float32))
 
     a_memref = get_ranked_memref_descriptor(a)
     b_memref = get_ranked_memref_descriptor(b)
