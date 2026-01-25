@@ -1,7 +1,7 @@
 [project]
 name = "my-mlir-playground"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "mlir==22.0.0.2025111701+cuda.99630eb1",
     "mlir-python-bindings",
