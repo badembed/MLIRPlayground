@@ -4,6 +4,8 @@ from mlir.passmanager import PassManager
 from mlir.runtime.np_to_memref import get_ranked_memref_descriptor
 
 import numpy as np
+from pathlib import Path
+import struct
 
 from utils import memref
 
@@ -201,14 +203,42 @@ def softmax_last_dim(x: np.ndarray) -> np.ndarray:
     return (ex / np.sum(ex, axis=-1, keepdims=True)).astype(np.float32)
 
 
+def write_tensor_binary(path: Path, arr: np.ndarray) -> None:
+    # Format:
+    # [dtype: int32][num_dims: int64][dim_sizes: int64 * rank][raw data]
+    # dtype IDs follow the user's script mapping: FP32 -> 1.
+    arr = np.ascontiguousarray(arr)
+    if arr.dtype != np.float32:
+        raise ValueError(f"Expected float32 tensor, got {arr.dtype}")
+    dtype_id = 1  # FP32
+    rank = arr.ndim
+    with path.open("wb") as f:
+        f.write(struct.pack("<i", dtype_id))
+        f.write(struct.pack("<q", rank))
+        for d in arr.shape:
+            f.write(struct.pack("<q", int(d)))
+        f.write(arr.tobytes(order="C"))
+
+
 def main():
     ctx = ir.Context()
     kernel = create_kernel(ctx)
 
-    q = np.ascontiguousarray(np.full((1, 2, 5, 8), 2.5, dtype=np.float32))
-    k = np.ascontiguousarray(np.full((1, 2, 5, 8), -0.75, dtype=np.float32))
-    v = np.ascontiguousarray(np.full((1, 2, 5, 8), 3.25, dtype=np.float32))
+    rng = np.random.default_rng(42)
+    q = np.ascontiguousarray(rng.normal(loc=0.2, scale=1.1, size=(1, 2, 5, 8)).astype(np.float32))
+    k = np.ascontiguousarray(rng.normal(loc=-0.1, scale=0.9, size=(1, 2, 5, 8)).astype(np.float32))
+    v = np.ascontiguousarray(rng.normal(loc=0.05, scale=1.3, size=(1, 2, 5, 8)).astype(np.float32))
     out = np.ascontiguousarray(np.zeros((1, 2, 5, 8), dtype=np.float32))
+
+    bin_dir = Path("playground/generated_bins")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    q_path = bin_dir / "q.bin"
+    k_path = bin_dir / "k.bin"
+    v_path = bin_dir / "v.bin"
+    out_path = bin_dir / "out.bin"
+    write_tensor_binary(q_path, q)
+    write_tensor_binary(k_path, k)
+    write_tensor_binary(v_path, v)
 
     pm = create_jit_pipeline(ctx)
     pm.run(kernel.operation)
@@ -234,6 +264,11 @@ def main():
     print("ref[0,0,0,0:8] =", ref[0, 0, 0, 0:8])
     print("max_abs_err =", max_abs)
     print("allclose =", bool(np.allclose(out, ref, rtol=1e-5, atol=1e-5)))
+    write_tensor_binary(out_path, out)
+    print("q_bin =", q_path)
+    print("k_bin =", k_path)
+    print("v_bin =", v_path)
+    print("out_bin =", out_path)
 
 
 if __name__ == "__main__":
