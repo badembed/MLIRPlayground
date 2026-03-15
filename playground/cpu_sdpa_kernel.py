@@ -13,45 +13,42 @@ def create_kernel(ctx: ir.Context) -> ir.Module:
         module = ir.Module.parse(
             r"""
 module {
-  func.func private @outlined_group_atomic_kernel_sdpa_0(
+  // compute K^T for each batch/head.
+  func.func private @kernel_k_transpose(
       %arg0: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
-      %arg1: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
-      %arg2: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
-      %arg3: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>,
-      %arg4: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>,
-      %arg5: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>) {
-      
-    // SDPA inputs/outputs (after collapsing batch and head dims into BH=2):
-    //   %arg0: Q [BH, S, D] = [2, 5, 8]
-    //   %arg1: K [BH, S, D] = [2, 5, 8]
-    //   %arg2: V [BH, S, D] = [2, 5, 8]
-    //   %arg3: scores scratch [BH, S, S] = Q * K^T
-    //   %arg4: probs scratch [BH, S, S] = softmax(scores * scale)
-    //   %arg5: output [BH, S, D] = probs * V
-    %cst0 = arith.constant 0.0 : f32
-    %cst_scale = arith.constant 1.250000e-01 : f32
-    %k_t = memref.alloc() : memref<2x8x5xf32>
-
-    // Prepare K^T per batch/head: [BH, S, D] -> [BH, D, S].
+      %arg1: memref<2x8x5xf32>) {
     linalg.transpose
-      ins(%arg1 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
-      outs(%k_t : memref<2x8x5xf32>)
+      ins(%arg0 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
+      outs(%arg1 : memref<2x8x5xf32>)
       permutation = [0, 2, 1]
+    return
+  }
 
-    // Compute attention scores = Q * K^T.
-    linalg.fill ins(%cst0 : f32) outs(%arg3 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>)
+  // compute scores = Q * K^T.
+  func.func private @kernel_qk_t(
+      %arg0: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
+      %arg1: memref<2x8x5xf32>,
+      %arg2: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) {
+    %cst0 = arith.constant 0.0 : f32
+    linalg.fill ins(%cst0 : f32) outs(%arg2 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>)
     linalg.batch_matmul
-      ins(%arg0, %k_t : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>)
-      outs(%arg3 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>)
+      ins(%arg0, %arg1 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>)
+      outs(%arg2 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>)
+    return
+  }
 
-    // Apply scale to scores before softmax: probs_pre = scores * 0.125.
+  // probs = softmax(scores * scale) along last dimension.
+  func.func private @kernel_softmax(
+      %arg0: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>,
+      %arg1: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) {
+    %cst_scale = arith.constant 1.250000e-01 : f32
     linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>
       ],
       iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%arg3 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) outs(%arg4 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) {
+    } ins(%arg0 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) outs(%arg1 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) {
     ^bb0(%in: f32, %_out: f32):
       %scaled = arith.mulf %in, %cst_scale : f32
       linalg.yield %scaled : f32
@@ -63,39 +60,42 @@ module {
     %cs = arith.constant 5 : index
     %neg_inf = arith.constant -3.4028235E+38 : f32
     %f32_zero = arith.constant 0.0 : f32
-    // Softmax along the last dimension (keys axis j):
-    // for each [b, i], do max-subtract, exp/sum, then normalize.
     scf.for %b = %c0 to %cb step %c1 {
       scf.for %i = %c0 to %cs step %c1 {
         %max = scf.for %j = %c0 to %cs step %c1 iter_args(%m = %neg_inf) -> (f32) {
-          %v = memref.load %arg4[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+          %v = memref.load %arg1[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
           %m2 = arith.maximumf %m, %v : f32
           scf.yield %m2 : f32
         }
         %sum = scf.for %j = %c0 to %cs step %c1 iter_args(%s = %f32_zero) -> (f32) {
-          %v = memref.load %arg4[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+          %v = memref.load %arg1[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
           %x = arith.subf %v, %max : f32
           %e = math.exp %x : f32
           %s2 = arith.addf %s, %e : f32
           scf.yield %s2 : f32
         }
         scf.for %j = %c0 to %cs step %c1 {
-          %v = memref.load %arg4[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+          %v = memref.load %arg1[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
           %x = arith.subf %v, %max : f32
           %e = math.exp %x : f32
           %y = arith.divf %e, %sum : f32
-          memref.store %y, %arg4[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+          memref.store %y, %arg1[%b, %i, %j] : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
         }
       }
     }
+    return
+  }
 
-    // Final SDPA output: O = softmax(scores * scale) * V.
-    linalg.fill ins(%cst0 : f32) outs(%arg5 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
+  // Final projection: O = probs * V.
+  func.func private @kernel_pv(
+      %arg0: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>,
+      %arg1: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
+      %arg2: memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>) {
+    %cst0 = arith.constant 0.0 : f32
+    linalg.fill ins(%cst0 : f32) outs(%arg2 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
     linalg.batch_matmul
-      ins(%arg4, %arg2 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
-      outs(%arg5 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
-    // Temporary transposed K buffer is no longer needed.
-    memref.dealloc %k_t : memref<2x8x5xf32>
+      ins(%arg0, %arg1 : memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
+      outs(%arg2 : memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>)
     return
   }
 
@@ -110,6 +110,7 @@ module {
     %view_scores = memref.alloc() : memref<1x2x5x5xf32>
     %view_probs = memref.alloc() : memref<1x2x5x5xf32>
     %view_out = memref.alloc() : memref<1x2x5x8xf32>
+    %k_t = memref.alloc() : memref<2x8x5xf32>
     %q3 = memref.subview %view_q[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
       : memref<1x2x5x8xf32> to memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>
     %k3 = memref.subview %view_k[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
@@ -130,11 +131,14 @@ module {
     func.call @copy_kernel_2(%arg2, %view_v)
       : (memref<1x2x5x8xf32>, memref<1x2x5x8xf32>) -> ()
 
-    func.call @outlined_group_atomic_kernel_sdpa_0(
-      %q3, %k3, %v3, %scores3, %probs3, %out3)
-      : (
-        memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>,
-        memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>) -> ()
+    func.call @kernel_k_transpose(%k3, %k_t)
+      : (memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>) -> ()
+    func.call @kernel_qk_t(%q3, %k_t, %scores3)
+      : (memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>, memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) -> ()
+    func.call @kernel_softmax(%scores3, %probs3)
+      : (memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) -> ()
+    func.call @kernel_pv(%probs3, %v3, %out3)
+      : (memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>) -> ()
 
     func.call @copy_kernel_3(%view_out, %arg3)
       : (memref<1x2x5x8xf32>, memref<1x2x5x8xf32>) -> ()
@@ -145,6 +149,7 @@ module {
     memref.dealloc %view_scores : memref<1x2x5x5xf32>
     memref.dealloc %view_probs : memref<1x2x5x5xf32>
     memref.dealloc %view_out : memref<1x2x5x8xf32>
+    memref.dealloc %k_t : memref<2x8x5xf32>
     return
   }
 
