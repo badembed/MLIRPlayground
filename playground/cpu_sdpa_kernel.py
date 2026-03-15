@@ -205,9 +205,9 @@ def main():
     ctx = ir.Context()
     kernel = create_kernel(ctx)
 
-    q = np.ascontiguousarray(np.ones((1, 2, 5, 8), dtype=np.float32))
-    k = np.ascontiguousarray(np.ones((1, 2, 5, 8), dtype=np.float32))
-    v = np.ascontiguousarray(np.ones((1, 2, 5, 8), dtype=np.float32))
+    q = np.ascontiguousarray(np.full((1, 2, 5, 8), 2.5, dtype=np.float32))
+    k = np.ascontiguousarray(np.full((1, 2, 5, 8), -0.75, dtype=np.float32))
+    v = np.ascontiguousarray(np.full((1, 2, 5, 8), 3.25, dtype=np.float32))
     out = np.ascontiguousarray(np.zeros((1, 2, 5, 8), dtype=np.float32))
 
     pm = create_jit_pipeline(ctx)
