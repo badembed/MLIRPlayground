@@ -155,6 +155,60 @@ module {
     return
   }
 
+  func.func @run_k_transpose(
+      %arg0: memref<1x2x5x8xf32>,
+      %arg1: memref<1x2x8x5xf32>) {
+    %k3 = memref.subview %arg0[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
+      : memref<1x2x5x8xf32> to memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>
+    %kt3 = memref.subview %arg1[0, 0, 0, 0] [1, 2, 8, 5] [1, 1, 1, 1]
+      : memref<1x2x8x5xf32> to memref<2x8x5xf32>
+    func.call @kernel_k_transpose(%k3, %kt3)
+      : (memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>) -> ()
+    return
+  }
+
+  func.func @run_qk_t(
+      %arg0: memref<1x2x5x8xf32>,
+      %arg1: memref<1x2x8x5xf32>,
+      %arg2: memref<1x2x5x5xf32>) {
+    %q3 = memref.subview %arg0[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
+      : memref<1x2x5x8xf32> to memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>
+    %kt3 = memref.subview %arg1[0, 0, 0, 0] [1, 2, 8, 5] [1, 1, 1, 1]
+      : memref<1x2x8x5xf32> to memref<2x8x5xf32>
+    %scores3 = memref.subview %arg2[0, 0, 0, 0] [1, 2, 5, 5] [1, 1, 1, 1]
+      : memref<1x2x5x5xf32> to memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+    func.call @kernel_qk_t(%q3, %kt3, %scores3)
+      : (memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x8x5xf32>, memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) -> ()
+    return
+  }
+
+  func.func @run_softmax(
+      %arg0: memref<1x2x5x5xf32>,
+      %arg1: memref<1x2x5x5xf32>) {
+    %scores3 = memref.subview %arg0[0, 0, 0, 0] [1, 2, 5, 5] [1, 1, 1, 1]
+      : memref<1x2x5x5xf32> to memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+    %probs3 = memref.subview %arg1[0, 0, 0, 0] [1, 2, 5, 5] [1, 1, 1, 1]
+      : memref<1x2x5x5xf32> to memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+    func.call @kernel_softmax(%scores3, %probs3)
+      : (memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) -> ()
+    return
+  }
+
+  func.func @run_pv(
+      %arg0: memref<1x2x5x5xf32>,
+      %arg1: memref<1x2x5x8xf32>,
+      %arg2: memref<1x2x5x8xf32>) {
+    %probs3 = memref.subview %arg0[0, 0, 0, 0] [1, 2, 5, 5] [1, 1, 1, 1]
+      : memref<1x2x5x5xf32> to memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>
+    %v3 = memref.subview %arg1[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
+      : memref<1x2x5x8xf32> to memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>
+    %out3 = memref.subview %arg2[0, 0, 0, 0] [1, 2, 5, 8] [1, 1, 1, 1]
+      : memref<1x2x5x8xf32> to memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>
+    func.call @kernel_pv(%probs3, %v3, %out3)
+      : (memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>, memref<2x5x8xf32, strided<[40, 8, 1], offset: 0>>) -> ()
+    return
+  }
+
   func.func private @copy_kernel_0(%arg0: memref<1x2x5x8xf32>, %arg1: memref<1x2x5x8xf32>) {
     memref.copy %arg0, %arg1 : memref<1x2x5x8xf32> to memref<1x2x5x8xf32>
     return
@@ -228,6 +282,9 @@ def main():
     q = np.ascontiguousarray(rng.normal(loc=0.2, scale=1.1, size=(1, 2, 5, 8)).astype(np.float32))
     k = np.ascontiguousarray(rng.normal(loc=-0.1, scale=0.9, size=(1, 2, 5, 8)).astype(np.float32))
     v = np.ascontiguousarray(rng.normal(loc=0.05, scale=1.3, size=(1, 2, 5, 8)).astype(np.float32))
+    k_t = np.ascontiguousarray(np.zeros((1, 2, 8, 5), dtype=np.float32))
+    scores = np.ascontiguousarray(np.zeros((1, 2, 5, 5), dtype=np.float32))
+    probs = np.ascontiguousarray(np.zeros((1, 2, 5, 5), dtype=np.float32))
     out = np.ascontiguousarray(np.zeros((1, 2, 5, 8), dtype=np.float32))
 
     bin_dir = Path("playground/generated_bins")
@@ -235,6 +292,9 @@ def main():
     q_path = bin_dir / "q.bin"
     k_path = bin_dir / "k.bin"
     v_path = bin_dir / "v.bin"
+    k_t_path = bin_dir / "k_t.bin"
+    scores_path = bin_dir / "scores.bin"
+    probs_path = bin_dir / "probs.bin"
     out_path = bin_dir / "out.bin"
     write_tensor_binary(q_path, q)
     write_tensor_binary(k_path, k)
@@ -245,14 +305,30 @@ def main():
 
     eng = ExecutionEngine(kernel)
     eng.initialize()
-    forward = eng.lookup("forward")
+    run_k_transpose = eng.lookup("run_k_transpose")
+    run_qk_t = eng.lookup("run_qk_t")
+    run_softmax = eng.lookup("run_softmax")
+    run_pv = eng.lookup("run_pv")
 
     q_memref = get_ranked_memref_descriptor(q)
     k_memref = get_ranked_memref_descriptor(k)
     v_memref = get_ranked_memref_descriptor(v)
+    k_t_memref = get_ranked_memref_descriptor(k_t)
+    scores_memref = get_ranked_memref_descriptor(scores)
+    probs_memref = get_ranked_memref_descriptor(probs)
     out_memref = get_ranked_memref_descriptor(out)
-    args = memref.to_packed_args([q_memref, k_memref, v_memref, out_memref])
-    forward(args)
+
+    run_k_transpose(memref.to_packed_args([k_memref, k_t_memref]))
+    write_tensor_binary(k_t_path, k_t)
+    print("k_t[0,0,0,0:5] =", k_t[0, 0, 0, 0:5])
+    run_qk_t(memref.to_packed_args([q_memref, k_t_memref, scores_memref]))
+    write_tensor_binary(scores_path, scores)
+    print("scores[0,0,0,0:5] =", scores[0, 0, 0, 0:5])
+    run_softmax(memref.to_packed_args([scores_memref, probs_memref]))
+    write_tensor_binary(probs_path, probs)
+    print("probs[0,0,0,0:5] =", probs[0, 0, 0, 0:5])
+    run_pv(memref.to_packed_args([probs_memref, v_memref, out_memref]))
+    write_tensor_binary(out_path, out)
 
     scores = np.matmul(q, np.swapaxes(k, -1, -2)) * 0.125
     probs = softmax_last_dim(scores)
@@ -264,10 +340,12 @@ def main():
     print("ref[0,0,0,0:8] =", ref[0, 0, 0, 0:8])
     print("max_abs_err =", max_abs)
     print("allclose =", bool(np.allclose(out, ref, rtol=1e-5, atol=1e-5)))
-    write_tensor_binary(out_path, out)
     print("q_bin =", q_path)
     print("k_bin =", k_path)
     print("v_bin =", v_path)
+    print("k_t_bin =", k_t_path)
+    print("scores_bin =", scores_path)
+    print("probs_bin =", probs_path)
     print("out_bin =", out_path)
 
 
