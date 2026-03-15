@@ -43,7 +43,7 @@ module {
   func.func private @kernel_softmax(
       %arg0: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>,
       %arg1: memref<2x5x5xf32, strided<[25, 5, 1], offset: 0>>) {
-    %cst_scale = arith.constant 1.250000e-01 : f32
+    %cst_scale = arith.constant 0.353553414 : f32
     linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
@@ -330,7 +330,7 @@ def main():
     run_pv(memref.to_packed_args([probs_memref, v_memref, out_memref]))
     write_tensor_binary(out_path, out)
 
-    scores = np.matmul(q, np.swapaxes(k, -1, -2)) * 0.125
+    scores = np.matmul(q, np.swapaxes(k, -1, -2)) * 0.353553414
     probs = softmax_last_dim(scores)
     ref = np.matmul(probs, v)
 
